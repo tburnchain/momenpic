@@ -1,0 +1,731 @@
+{
+  "uid": "acvm-money",
+  "title": "ACVM · 머니 뷰",
+  "description": "§9.3 머니 뷰 — GMV / 확정 수수료 / 취소 차감 / 순이익을 반드시 분리 표시 (§2.4). 순이익 = 확정 수수료 − 취소 차감 − 변동비(cost_ledger), 인프라 고정비 제외.",
+  "tags": [
+    "acvm",
+    "money"
+  ],
+  "timezone": "Asia/Seoul",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "acvm"
+      ],
+      "asDropdown": true,
+      "title": "ACVM",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "type": "textbox",
+        "name": "istar",
+        "label": "I* 손익분기 조회수",
+        "query": "700",
+        "current": {
+          "text": "700",
+          "value": "700"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "기간 합계 (KRW)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "GMV (상품 판매액)",
+      "description": "GMV는 수익이 아니다 (§2.4)",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT sum(gmv_krw) AS gmv FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto",
+        "wideLayout": true
+      },
+      "id": 2,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "확정 수수료",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT sum(commission_krw) AS commission FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto",
+        "wideLayout": true
+      },
+      "id": 3,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 5,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "취소·반품 차감",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT sum(cancelled_krw) AS cancelled FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto",
+        "wideLayout": true
+      },
+      "id": 4,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 10,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "변동비 (LLM·TTS·렌더)",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "acvm-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "acvm-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(sum(amount_krw), 0) AS cost FROM cost_ledger WHERE $__timeFilter(at)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto",
+        "wideLayout": true
+      },
+      "id": 5,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "순이익 (변동비 기준)",
+      "description": "",
+      "datasource": {
+        "type": "__expr__",
+        "uid": "__expr__"
+      },
+      "targets": [
+        {
+          "refId": "COMM",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT toFloat64(sum(commission_krw)) AS v FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date)",
+          "hide": true
+        },
+        {
+          "refId": "CANC",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT toFloat64(sum(cancelled_krw)) AS v FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date)",
+          "hide": true
+        },
+        {
+          "refId": "COST",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "acvm-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(sum(amount_krw), 0)::float8 AS v FROM cost_ledger WHERE $__timeFilter(at)",
+          "hide": true
+        },
+        {
+          "refId": "NET",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "type": "math",
+          "expression": "$COMM - $CANC - $COST",
+          "hide": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto",
+        "wideLayout": true
+      },
+      "id": 6,
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      }
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "일별 추이",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "일별 GMV / 확정 수수료 / 취소 차감",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT toDateTime(date) AS time, sum(gmv_krw) AS GMV, sum(commission_krw) AS commission, sum(cancelled_krw) AS cancelled FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date) GROUP BY date ORDER BY date"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "일별 변동비 (stage)",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "acvm-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "acvm-postgres"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', at AT TIME ZONE 'Asia/Seoul') AS time, stage AS metric, sum(amount_krw) AS value FROM cost_ledger WHERE $__timeFilter(at) GROUP BY 1, 2 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyKRW",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "채널 효율 (§2.3 KPI 1순위: 중앙값 조회수 ÷ I*)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "플랫폼별 중앙값 조회수 ÷ I*",
+      "description": "≥ 1 이면 콘텐츠를 늘릴수록 이익이 선형 이상 증가 (§2.3). 계정 단위는 콘솔 리포트 참조.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT platform, count() AS publications, quantileExact(0.5)(views) AS median_views, round(median_views / ${istar}, 2) AS median_over_istar FROM ( SELECT platform, publication_id, argMax(value, (ts, version)) AS views FROM acvm.perf_event WHERE metric = 'views' AND $__timeFilter(ts) GROUP BY platform, publication_id) GROUP BY platform ORDER BY median_over_istar DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 11,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      }
+    },
+    {
+      "type": "table",
+      "title": "플랫폼별 수수료 (기간)",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT pl.platform AS platform, sum(r.gmv_krw) AS gmv_krw, sum(r.commission_krw) AS commission_krw, sum(r.cancelled_krw) AS cancelled_krw, sum(r.clicks) AS clicks, sum(r.orders) AS orders, round(sum(r.commission_krw) / greatest(sum(r.clicks), 1), 1) AS epc_krw FROM (SELECT * FROM acvm.affiliate_report FINAL WHERE $__dateFilter(date)) AS r INNER JOIN (SELECT sub_id, platform FROM acvm.publication_link FINAL) AS pl ON pl.sub_id = r.sub_id GROUP BY platform ORDER BY commission_krw DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 12,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      }
+    },
+    {
+      "type": "table",
+      "title": "콘텐츠 ROI 상위 25 (누적, subId 1:1)",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "acvm-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "acvm-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT platform, sub_id, content_id, views, report_clicks, orders, gmv_krw, commission_krw, cancelled_krw, net_commission_krw, round(epc_krw, 1) AS epc_krw FROM acvm.content_roi ORDER BY net_commission_krw DESC LIMIT 25"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 13,
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      }
+    }
+  ]
+}

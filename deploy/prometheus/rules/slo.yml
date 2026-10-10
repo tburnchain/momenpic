@@ -1,0 +1,299 @@
+# §9.2 SLOs → recording rules + alerts. Metric names: src/acvm/core/metrics.py (contract, checked by
+# tests/unit/test_ops_configs.py). Label vocabularies this file relies on:
+#   acvm_command_to_publish_seconds{kind}     text | short          (ContentKind; HOLD-ed items are not observed)
+#   acvm_publish_attempts_total{outcome}      SLO numerator  : published | manual_published
+#                                             SLO denominator: numerator + failed | expired | token_error | integrity_violation
+#                                             not counted    : policy_reject (§9.2 "플랫폼 정책 거절 제외"), warning,
+#                                                              retryable_error (retried), processing, deferred_*,
+#                                                              circuit_open, manual_queued, refused_*, cancelled_*, taken_down
+#   acvm_attribution_lag_seconds{source}      coupang | platform
+#   acvm_coupang_calls_total{outcome}         ok | forbidden (HTTP 403) | rate_limited | circuit_open | cache_hit | ...
+#   acvm_circuit_open{name}                   coupang:<endpoint> | platform:<platform>
+#   acvm_queue_depth{queue}                   hold_review | publication_<state> (set by acvm-loops)
+#   acvm_budget_limit_krw{workspace}          optional gauge; falls back to the 20,000 KRW default budget
+#
+# severity=page → immediate (Alertmanager route "page"); severity=ticket → next working block (route "ticket").
+
+groups:
+  - name: acvm-slo-recording
+    interval: 30s
+    rules:
+      # ── plan latency (SLO p95 ≤ 20 s) ──
+      - record: acvm:command_plan_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(acvm_command_plan_seconds_bucket[5m])))
+      - record: acvm:command_plan_seconds:p95_1h
+        expr: histogram_quantile(0.95, sum by (le) (rate(acvm_command_plan_seconds_bucket[1h])))
+      - record: acvm:command_plan:count_1h
+        expr: sum(increase(acvm_command_plan_seconds_count[1h]))
+
+      # ── command → publish (SLO text p95 ≤ 180 s, short p95 ≤ 600 s) ──
+      - record: acvm:command_to_publish_seconds:p95_1h
+        expr: histogram_quantile(0.95, sum by (le, kind) (rate(acvm_command_to_publish_seconds_bucket[1h])))
+      - record: acvm:command_to_publish_seconds:p95_6h
+        expr: histogram_quantile(0.95, sum by (le, kind) (rate(acvm_command_to_publish_seconds_bucket[6h])))
+      - record: acvm:command_to_publish:count_1h
+        expr: sum by (kind) (increase(acvm_command_to_publish_seconds_count[1h]))
+
+      # ── publish success (SLO ≥ 99 % over 1 h, outcome="policy_reject" excluded) ──
+      - record: acvm:publish_success:ratio_rate5m
+        expr: >-
+          (sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published"}[5m])) or vector(0))
+          / sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[5m]))
+      - record: acvm:publish_success:ratio_rate30m
+        expr: >-
+          (sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published"}[30m])) or vector(0))
+          / sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[30m]))
+      - record: acvm:publish_success:ratio_rate1h
+        expr: >-
+          (sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published"}[1h])) or vector(0))
+          / sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[1h]))
+      - record: acvm:publish_success:ratio_rate6h
+        expr: >-
+          (sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published"}[6h])) or vector(0))
+          / sum(rate(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[6h]))
+      - record: acvm:publish_success:ratio_rate1h_by_platform
+        expr: >-
+          (
+            sum by (platform) (rate(acvm_publish_attempts_total{outcome=~"published|manual_published"}[1h]))
+            or 0 * sum by (platform) (rate(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[1h]))
+          )
+          / sum by (platform) (rate(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[1h]))
+      - record: acvm:publish_eligible_attempts:increase1h
+        expr: sum(increase(acvm_publish_attempts_total{outcome=~"published|manual_published|failed|expired|token_error|integrity_violation"}[1h]))
+      - record: acvm:publish_policy_rejects:increase1h
+        expr: sum by (platform) (increase(acvm_publish_attempts_total{outcome=~"policy_reject|warning"}[1h]))
+
+      # ── attribution freshness (platform ≤ 1 h, Coupang report D+1 ≤ 36 h) ──
+      - record: acvm:attribution_lag_seconds:max
+        expr: max by (source) (acvm_attribution_lag_seconds)
+
+      # ── gate / pipeline / render ──
+      - record: acvm:gate_verdicts:increase1h
+        expr: sum by (verdict) (increase(acvm_gate_verdicts_total[1h]))
+      - record: acvm:gate_rule_regressions:increase24h
+        expr: sum(increase(acvm_gate_rule_regressions_total[24h]))
+      - record: acvm:stage_duration_seconds:p95_15m
+        expr: histogram_quantile(0.95, sum by (le, stage) (rate(acvm_stage_duration_seconds_bucket[15m])))
+      - record: acvm:render_seconds:p95_1h
+        expr: histogram_quantile(0.95, sum by (le) (rate(acvm_render_seconds_bucket[1h])))
+
+      # ── risk ──
+      - record: acvm:accounts:by_platform_status
+        expr: max by (platform, status) (acvm_account_status)
+      - record: acvm:accounts:by_status
+        expr: sum by (status) (max by (platform, status) (acvm_account_status))
+      - record: acvm:coupang_forbidden:increase10m
+        expr: sum(increase(acvm_coupang_calls_total{outcome="forbidden"}[10m]))
+
+      # ── money / budget ──
+      - record: acvm:budget_used:ratio
+        expr: >-
+          (
+            max by (workspace) (acvm_budget_spent_krw)
+            / on (workspace) max by (workspace) (acvm_budget_limit_krw)
+          )
+          or max by (workspace) (acvm_budget_spent_krw) / 20000
+      - record: acvm:llm_cost_krw:increase1h
+        expr: sum by (purpose) (increase(acvm_llm_cost_krw_total[1h]))
+
+  - name: acvm-slo-alerts
+    rules:
+      # ── §9.2 latency SLOs ──
+      - alert: ACVMPlanLatencySLOBreach
+        expr: acvm:command_plan_seconds:p95_1h > 20 and on () acvm:command_plan:count_1h >= 10
+        for: 15m
+        labels: {severity: ticket, slo: plan_latency}
+        annotations:
+          summary: "명령→계획 p95 {{ $value | humanizeDuration }} (SLO ≤ 20 s)"
+          description: "Commander planning is slow. Check LLM latency/fallbacks (acvm_llm_tokens_total) and Temporal backlog."
+          runbook_url: docs/RUNBOOK.md#slo-latency
+
+      - alert: ACVMTextCommandToPublishSLOBreach
+        expr: >-
+          acvm:command_to_publish_seconds:p95_1h{kind="text"} > 180
+          and on (kind) acvm:command_to_publish:count_1h{kind="text"} >= 5
+        for: 15m
+        labels: {severity: ticket, slo: text_cmd_to_publish}
+        annotations:
+          summary: "텍스트 명령→게시 p95 {{ $value | humanizeDuration }} (SLO ≤ 3 min)"
+          runbook_url: docs/RUNBOOK.md#slo-latency
+
+      - alert: ACVMShortCommandToPublishSLOBreach
+        expr: >-
+          acvm:command_to_publish_seconds:p95_1h{kind="short"} > 600
+          and on (kind) acvm:command_to_publish:count_1h{kind="short"} >= 3
+        for: 30m
+        labels: {severity: ticket, slo: short_cmd_to_publish}
+        annotations:
+          summary: "쇼츠 명령→게시 p95 {{ $value | humanizeDuration }} (SLO ≤ 10 min, HOLD 제외)"
+          description: "Check render p95 (acvm:render_seconds:p95_1h) and the Temporal task-queue backlog."
+          runbook_url: docs/RUNBOOK.md#slo-latency
+
+      # ── §9.2 publish success ≥ 99 % (policy rejects excluded) ──
+      - alert: ACVMPublishSuccessBelowSLO
+        expr: acvm:publish_success:ratio_rate1h < 0.99 and on () acvm:publish_eligible_attempts:increase1h >= 20
+        for: 10m
+        labels: {severity: page, slo: publish_success}
+        annotations:
+          summary: "게시 성공률(1h) {{ $value | humanizePercentage }} < 99 %"
+          description: "See acvm:publish_success:ratio_rate1h_by_platform; a single adapter failing usually means its circuit breaker should be open (§9.5-1)."
+          runbook_url: docs/RUNBOOK.md#platform-4xx
+
+      - alert: ACVMPublishErrorBudgetFastBurn
+        expr: >-
+          (1 - acvm:publish_success:ratio_rate1h) > (14.4 * 0.01)
+          and (1 - acvm:publish_success:ratio_rate5m) > (14.4 * 0.01)
+          and on () acvm:publish_eligible_attempts:increase1h >= 20
+        for: 2m
+        labels: {severity: page, slo: publish_success}
+        annotations:
+          summary: "게시 오류 예산 고속 소진 (14.4× burn, 1h/5m)"
+          runbook_url: docs/RUNBOOK.md#platform-4xx
+
+      - alert: ACVMPublishErrorBudgetSlowBurn
+        expr: >-
+          (1 - acvm:publish_success:ratio_rate6h) > (6 * 0.01)
+          and (1 - acvm:publish_success:ratio_rate30m) > (6 * 0.01)
+        for: 15m
+        labels: {severity: ticket, slo: publish_success}
+        annotations:
+          summary: "게시 오류 예산 저속 소진 (6× burn, 6h/30m)"
+          runbook_url: docs/RUNBOOK.md#platform-4xx
+
+      # ── §9.2 attribution freshness ──
+      - alert: ACVMPlatformAttributionStale
+        expr: acvm:attribution_lag_seconds:max{source!="coupang"} > 3600
+        for: 10m
+        labels: {severity: ticket, slo: attribution_freshness}
+        annotations:
+          summary: "플랫폼 지표 수집 지연 {{ $labels.source }}: {{ $value | humanizeDuration }} (SLO ≤ 1 h)"
+          description: "Hourly insights loop (acvm-loops) or the platform token may be failing — check token expiry."
+          runbook_url: docs/RUNBOOK.md#token-expiry
+
+      - alert: ACVMCoupangAttributionStale
+        expr: acvm:attribution_lag_seconds:max{source="coupang"} > 129600
+        for: 30m
+        labels: {severity: ticket, slo: attribution_freshness}
+        annotations:
+          summary: "쿠팡 리포트 신선도 {{ $value | humanizeDuration }} (SLO D+1, ≤ 36 h)"
+          runbook_url: docs/RUNBOOK.md#coupang-403
+
+      # ── §9.2 gate: D/C-04/R-01 rule misses = 0 (page immediately) ──
+      - alert: ACVMGateRuleRegression
+        expr: sum(increase(acvm_gate_rule_regressions_total[10m])) > 0
+        labels: {severity: page, slo: gate_zero_miss}
+        annotations:
+          summary: "M7 게이트 우회: PASS 없이 배포 경로에 도달한 콘텐츠 발생 — 즉시 게시 중지"
+          description: "Must stay 0 (§8). Stop publishing (pause acvm-publisher), take the content down, run the gate regression suite."
+          runbook_url: docs/RUNBOOK.md#gate-regression
+
+      # ── §9.5 incidents ──
+      - alert: ACVMCircuitBreakerOpen
+        expr: max by (name) (acvm_circuit_open) == 1
+        for: 1m
+        labels: {severity: ticket}
+        annotations:
+          summary: "서킷 브레이커 개방: {{ $labels.name }} (큐는 보존됨)"
+          runbook_url: docs/RUNBOOK.md#platform-4xx
+
+      - alert: ACVMCircuitBreakerStuckOpen
+        expr: max by (name) (acvm_circuit_open) == 1
+        for: 75m
+        labels: {severity: page}
+        annotations:
+          summary: "서킷 브레이커 {{ $labels.name }} 75분 이상 개방 — 1시간 후 단건 재시도도 실패"
+          runbook_url: docs/RUNBOOK.md#platform-4xx
+
+      - alert: ACVMCoupangForbidden
+        expr: acvm:coupang_forbidden:increase10m > 0
+        labels: {severity: page}
+        annotations:
+          summary: "쿠팡 파트너스 API 403 — 호출 즉시 중단, 캐시로 운영, 1시간 후 단건 재시도 (§9.5-2)"
+          description: "Consecutive 403s are reported to trigger sanctions. Verify the coupang:* breakers are open and no loop is retrying."
+          runbook_url: docs/RUNBOOK.md#coupang-403
+
+      - alert: ACVMAccountRestricted
+        expr: >-
+          sum(acvm:accounts:by_status{status="restricted"})
+          > (sum(acvm:accounts:by_status{status="restricted"} offset 30m) or vector(0))
+        labels: {severity: page}
+        annotations:
+          summary: "계정 제재 감지 — 해당 계정 예약 전부 취소, 원인 게시물 격리, 규칙 사후 분석 (§9.5-3)"
+          runbook_url: docs/RUNBOOK.md#account-sanction
+
+      - alert: ACVMAccountCooldownSpike
+        expr: >-
+          sum(acvm:accounts:by_status{status="cooldown"})
+          - (sum(acvm:accounts:by_status{status="cooldown"} offset 1h) or vector(0)) >= 2
+        labels: {severity: ticket}
+        annotations:
+          summary: "1시간 내 쿨다운 전환 계정 {{ $value }}개 증가 (§7.1-3)"
+          runbook_url: docs/RUNBOOK.md#account-sanction
+
+      - alert: ACVMAccountsMostlyCoolingDown
+        expr: sum(acvm:accounts:by_status{status="cooldown"}) / sum(acvm:accounts:by_status) > 0.25
+        for: 30m
+        labels: {severity: page}
+        annotations:
+          summary: "전체 계정의 {{ $value | humanizePercentage }}가 쿨다운 — 운영 상한/유사도 규칙 점검"
+          runbook_url: docs/RUNBOOK.md#account-sanction
+
+      - alert: ACVMInvalidClickDetected
+        expr: sum by (reason) (increase(acvm_invalid_click_alerts_total[15m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "무효 클릭 감지 ({{ $labels.reason }}) — 해당 링크 일시 중지 확인"
+          runbook_url: docs/RUNBOOK.md#invalid-clicks
+
+      - alert: ACVMInvalidClickSurge
+        expr: sum(increase(acvm_invalid_click_alerts_total[1h])) > 10
+        labels: {severity: page}
+        annotations:
+          summary: "무효 클릭 급증 (1h {{ $value }}건) — 파트너스 이용 제한 사유, 즉시 확인"
+          runbook_url: docs/RUNBOOK.md#invalid-clicks
+
+      - alert: ACVMBudgetNearlyExhausted
+        expr: acvm:budget_used:ratio >= 0.9
+        labels: {severity: ticket}
+        annotations:
+          summary: "워크스페이스 {{ $labels.workspace }} 일 예산 {{ $value | humanizePercentage }} 사용"
+          runbook_url: docs/RUNBOOK.md#budget-exhaustion
+
+      - alert: ACVMBudgetExhausted
+        expr: acvm:budget_used:ratio >= 1
+        labels: {severity: ticket}
+        annotations:
+          summary: "워크스페이스 {{ $labels.workspace }} 예산 소진 — 남은 상품 일시 중지됨 (§5.2 예산 캐핑)"
+          runbook_url: docs/RUNBOOK.md#budget-exhaustion
+
+      - alert: ACVMHoldQueueBacklog
+        expr: max(acvm_queue_depth{queue="hold_review"}) > 60
+        for: 2h
+        labels: {severity: ticket}
+        annotations:
+          summary: "HOLD 승인 대기 {{ $value }}건 (설계 기준 일 ~30건, 15분/일)"
+          runbook_url: docs/RUNBOOK.md#hold-backlog
+
+      - alert: ACVMPublicationsStuckInFlight
+        expr: max by (queue) (acvm_queue_depth{queue=~"publication_(uploading|processing)"}) > 50
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "게시 진행 중 상태 적체 {{ $labels.queue }} {{ $value }}건 (컨테이너 24h 만료 전 확인)"
+          runbook_url: docs/RUNBOOK.md#slo-latency
+
+      - alert: ACVMRenderSlow
+        expr: acvm:render_seconds:p95_1h > 60
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "렌더 p95 {{ $value | humanizeDuration }} (M6 목표 30초 영상 ≤ 60 s)"
+          runbook_url: docs/RUNBOOK.md#slo-latency
+
+      - alert: ACVMMetricsMissing
+        expr: absent(acvm_gate_rule_regressions_total)
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "ACVM 메트릭이 수집되지 않음 — SLO/게이트 경보가 무력화된 상태"
+          runbook_url: docs/RUNBOOK.md#slo-latency

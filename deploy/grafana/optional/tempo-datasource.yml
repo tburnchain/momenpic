@@ -1,0 +1,17 @@
+# Mounted only by docker-compose.tracing.yml. Links Loki log lines (trace_id) ↔ Tempo traces.
+apiVersion: 1
+datasources:
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceID: true
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+      serviceMap:
+        datasourceUid: prometheus

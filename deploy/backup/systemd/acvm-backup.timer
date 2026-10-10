@@ -1,0 +1,10 @@
+[Unit]
+Description=ACVM daily backup at 03:30 KST (lowest publishing traffic; schedule window is 09:00–23:00)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Seoul
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

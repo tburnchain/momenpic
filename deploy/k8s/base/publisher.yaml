@@ -1,0 +1,78 @@
+# acvm-publisher — Temporal worker on task queue acvm-publish; the only Deployment holding the Vault publisher
+# AppRole (social tokens, 5-minute TTL — §10). Kept small on purpose: publishing is quota-bound, not CPU-bound.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acvm-publisher
+  labels: {app.kubernetes.io/name: acvm-publisher, acvm.io/tier: app}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: {app.kubernetes.io/name: acvm-publisher}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: acvm-publisher, acvm.io/tier: app, acvm.io/egress: internet}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: acvm-publisher
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: publisher
+          image: acvm-worker
+          command: ["python", "-m", "acvm.orchestration.worker", "--queue", "acvm-publish"]
+          ports:
+            - {name: metrics, containerPort: 9464}
+          envFrom:
+            - configMapRef: {name: acvm-config}
+            - secretRef: {name: acvm-runtime}
+            - secretRef: {name: acvm-approle-publisher}
+          env:
+            - {name: OTEL_SERVICE_NAME, value: acvm-publisher}
+            - {name: ACVM_TEMPORAL_TASK_QUEUE, value: acvm-publish}
+          livenessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            periodSeconds: 30
+            failureThreshold: 4
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: var, mountPath: /app/var}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}
+        - name: var
+          emptyDir: {sizeLimit: 2Gi}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: acvm-publisher
+spec:
+  scaleTargetRef: {name: acvm-publisher}
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  pollingInterval: 30
+  cooldownPeriod: 600
+  fallback: {failureThreshold: 3, replicas: 1}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: sum(approximate_backlog_count{namespace="acvm", taskqueue="acvm-publish"}) or vector(0)
+        threshold: "20"

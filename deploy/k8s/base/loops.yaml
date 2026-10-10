@@ -1,0 +1,69 @@
+# acvm-loops — periodic loops (outbox relay, publish scheduler, insights hourly, reports daily, link health 6 h,
+# invalid-click scan, retention). Leader-elected through Redis, but run exactly ONE replica and never surge:
+# Recreate strategy guarantees the old leader is gone before the new one starts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acvm-loops
+  labels: {app.kubernetes.io/name: acvm-loops, acvm.io/tier: app}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: acvm-loops}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: acvm-loops, acvm.io/tier: app, acvm.io/egress: internet}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: acvm-loops
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: wait-for-migrations
+          image: acvm-worker
+          command: ["python", "-m", "acvm.db.migrations", "wait", "--timeout", "900"]
+          envFrom:
+            - secretRef: {name: acvm-runtime}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      containers:
+        - name: loops
+          image: acvm-worker
+          command: ["python", "-m", "acvm.orchestration.loops"]
+          envFrom:
+            - configMapRef: {name: acvm-config}
+            - secretRef: {name: acvm-runtime}
+            - secretRef: {name: acvm-approle-loops}
+          env:
+            - {name: OTEL_SERVICE_NAME, value: acvm-loops}
+            - {name: ACVM_TEMPORAL_TASK_QUEUE, value: acvm-publish}   # scheduled PublishWorkflows → acvm-publisher
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: var, mountPath: /app/var}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}
+        - name: var
+          emptyDir: {sizeLimit: 1Gi}

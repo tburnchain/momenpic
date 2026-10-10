@@ -1,0 +1,52 @@
+# Build context for deploy/docker/Dockerfile is the repo root; only pyproject.toml, uv.lock, alembic.ini and
+# src/ are needed. Everything else is excluded to keep the context small and secrets out of layers.
+# (console/ has its own Dockerfile and context.)
+
+# VCS / tooling
+.git
+.github
+.gitignore
+.claude
+.idea
+.vscode
+*.swp
+
+# Python build/test artefacts
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.hypothesis
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+dist
+build
+*.egg-info
+
+# runtime data & local state
+var
+*.db
+*.sqlite
+*.sqlite3
+
+# secrets — never in an image layer
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/secrets
+**/*.unseal
+deploy/compose/env
+
+# not needed in the Python image
+console
+docs
+tests
+deploy
+Makefile
+*.md

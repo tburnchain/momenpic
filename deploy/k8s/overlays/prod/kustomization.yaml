@@ -1,0 +1,94 @@
+# Production overlay:  kubectl apply -k deploy/k8s/overlays/prod
+# Bump `images[].newTag` per release (release.yml publishes signed images; verify with cosign before applying).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: acvm
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      acvm.io/env: prod
+    includeSelectors: false
+
+# names are the ones the base `images:` transformer already produced
+images:
+  - name: ghcr.io/tburn-labs/acvm-api
+    newTag: 1.0.0
+  - name: ghcr.io/tburn-labs/acvm-worker
+    newTag: 1.0.0
+  - name: ghcr.io/tburn-labs/acvm-render
+    newTag: 1.0.0
+  - name: ghcr.io/tburn-labs/acvm-console
+    newTag: 1.0.0
+
+configMapGenerator:
+  - name: acvm-config
+    behavior: merge
+    literals:
+      - ACVM_ENV=prod
+      - ACVM_PLATFORMS__DRY_RUN=false
+      - ACVM_COUPANG__SANDBOX=false
+      - ACVM_LLM__BACKEND=anthropic
+      - ACVM_EMBEDDINGS__BACKEND=voyage
+      - ACVM_LINK_HUB_BASE_URL=https://go.example.com
+      - ACVM_OBJECTS__ENDPOINT_URL=https://ACCOUNT_ID.r2.cloudflarestorage.com
+      - ACVM_OBJECTS__PUBLIC_BASE_URL=https://media.example.com
+      - ACVM_SECURITY__CF_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com
+      - ACVM_SECURITY__CF_ACCESS_AUDIENCE=console-aud
+      - ACVM_COUPANG__PARTNER_ID=AF0000000
+  - name: cloudflared-config
+    behavior: replace
+    files:
+      - config.yml=cloudflared-config.yml
+
+replicas:
+  - name: acvm-api
+    count: 3
+  - name: acvm-worker
+    count: 3
+  - name: acvm-render
+    count: 2
+  - name: cloudflared
+    count: 2
+
+patches:
+  # api: more headroom for hub traffic spikes
+  - target: {kind: HorizontalPodAutoscaler, name: acvm-api}
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 10
+  # render: up to 6 pods × 8 concurrent renders at peak (6,000+ shorts/month)
+  - target: {group: keda.sh, kind: ScaledObject, name: acvm-render}
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicaCount
+        value: 6
+      - op: replace
+        path: /spec/minReplicaCount
+        value: 2
+  - target: {group: keda.sh, kind: ScaledObject, name: acvm-worker}
+    patch: |-
+      - op: replace
+        path: /spec/minReplicaCount
+        value: 3
+      - op: replace
+        path: /spec/maxReplicaCount
+        value: 10
+  # render nodes: keep heavy ffmpeg pods off the nodes running api/console (label nodes acvm.io/pool=render)
+  - target: {kind: Deployment, name: acvm-render}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/affinity
+        value:
+          nodeAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                    - {key: acvm.io/pool, operator: In, values: [render]}

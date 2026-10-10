@@ -1,0 +1,12 @@
+# Files under deploy/ run inside Linux containers / on the Linux host: keep LF even on Windows checkouts.
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.hcl       text eol=lf
+*.conf      text eol=lf
+*.json      text eol=lf
+*.service   text eol=lf
+*.timer     text eol=lf
+*.env       text eol=lf
+*.example   text eol=lf
+Dockerfile  text eol=lf

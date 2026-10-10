@@ -1,0 +1,185 @@
+# Platform health for the single-server deployment: processes, data stores, Vault, backups (§10 RPO/RTO), host.
+groups:
+  - name: acvm-infra
+    rules:
+      - alert: ACVMApiDown
+        expr: up{job="acvm-api"} == 0 or absent(up{job="acvm-api"} == 1)
+        for: 3m
+        labels: {severity: page}
+        annotations:
+          summary: "acvm-api 다운 — 링크 허브(/hub, /r)와 콘솔 API 중단"
+          runbook_url: docs/RUNBOOK.md#process-down
+
+      - alert: ACVMWorkerDown
+        expr: >-
+          up{job=~"acvm-worker|acvm-publisher|acvm-render|acvm-loops"} == 0
+          or absent(up{job="acvm-worker"} == 1)
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "ACVM 워커 다운: {{ $labels.job }} {{ $labels.instance }}"
+          runbook_url: docs/RUNBOOK.md#process-down
+
+      - alert: TemporalDown
+        expr: up{job="temporal"} == 0
+        for: 3m
+        labels: {severity: page}
+        annotations:
+          summary: "Temporal 서버 메트릭 수집 실패 — 워크플로 실행 중단 가능"
+          runbook_url: docs/RUNBOOK.md#process-down
+
+      - alert: VaultSealedOrDown
+        expr: up{job="vault"} == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "Vault 봉인(sealed) 또는 다운 — 재시작 후 수동 언실 필요"
+          description: "docker compose exec vault vault operator unseal (×3). Publishing stops within 5 min (token TTL)."
+          runbook_url: docs/RUNBOOK.md#vault-unseal
+
+      # ── PostgreSQL (RPO 15 min) ──
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "PostgreSQL 연결 불가"
+          runbook_url: docs/RUNBOOK.md#restore
+
+      - alert: PostgresWalArchiveFailing
+        expr: increase(pg_stat_archiver_failed_count[15m]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "WAL-G wal-push 실패 — RPO 15분 위반 위험, pg_wal 증가 중"
+          description: "docker compose logs postgres | grep wal-push; check R2 credentials/egress (env/walg.env)."
+          runbook_url: docs/RUNBOOK.md#backup-failure
+
+      - alert: PostgresWalArchiveStale
+        expr: pg_stat_archiver_last_archive_age > 1800
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "마지막 WAL 아카이브 {{ $value | humanizeDuration }} 전 (archive_timeout 300 s)"
+          runbook_url: docs/RUNBOOK.md#backup-failure
+
+      - alert: PostgresConnectionsHigh
+        expr: sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.8
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "PostgreSQL 연결 사용률 {{ $value | humanizePercentage }}"
+
+      # ── Redis (streams, noeviction) ──
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "Redis 다운 — 이벤트 버스/토큰 버킷 중단"
+          runbook_url: docs/RUNBOOK.md#process-down
+
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85 and redis_memory_max_bytes > 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Redis 메모리 {{ $value | humanizePercentage }} — noeviction 정책상 100 %에서 쓰기 실패"
+          description: "Trim consumed streams (XTRIM) or raise maxmemory + the container memory limit."
+
+      - alert: RedisPersistenceFailing
+        expr: redis_rdb_last_bgsave_status == 0 or redis_aof_last_write_status == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Redis AOF/RDB 쓰기 실패 — 디스크 확인"
+
+      # ── backups (§10: daily full + continuous WAL, RPO 15 min / RTO 2 h) ──
+      - alert: BackupPostgresStale
+        expr: time() - acvm_backup_last_success_timestamp_seconds{kind="postgres_full"} > 26 * 3600
+        labels: {severity: page}
+        annotations:
+          summary: "PostgreSQL 풀 백업 {{ $value | humanizeDuration }} 경과 (일 1회 기준)"
+          runbook_url: docs/RUNBOOK.md#backup-failure
+
+      - alert: BackupPostgresNeverRecorded
+        expr: absent(acvm_backup_last_success_timestamp_seconds{kind="postgres_full"})
+        for: 30h
+        labels: {severity: ticket}
+        annotations:
+          summary: "백업 성공 기록 없음 — acvm-backup.timer 설치 여부 확인"
+          runbook_url: docs/RUNBOOK.md#backup-failure
+
+      - alert: BackupClickhouseStale
+        expr: time() - acvm_backup_last_success_timestamp_seconds{kind="clickhouse"} > 26 * 3600
+        labels: {severity: ticket}
+        annotations:
+          summary: "ClickHouse 백업 {{ $value | humanizeDuration }} 경과"
+          runbook_url: docs/RUNBOOK.md#backup-failure
+
+      - alert: BackupVaultStale
+        expr: time() - acvm_backup_last_success_timestamp_seconds{kind="vault"} > 26 * 3600
+        labels: {severity: ticket}
+        annotations:
+          summary: "Vault 스토리지 백업 {{ $value | humanizeDuration }} 경과"
+          runbook_url: docs/RUNBOOK.md#backup-failure
+
+      - alert: RestoreDrillOverdue
+        expr: time() - acvm_backup_last_success_timestamp_seconds{kind="restore_drill"} > 35 * 86400
+        labels: {severity: ticket}
+        annotations:
+          summary: "복구 훈련 35일 이상 미실시"
+          runbook_url: docs/RUNBOOK.md#restore-drill
+
+      - alert: RestoreDrillRtoExceeded
+        expr: acvm_restore_drill_rto_seconds > 7200
+        labels: {severity: ticket}
+        annotations:
+          summary: "최근 복구 훈련 RTO {{ $value | humanizeDuration }} > 2 h"
+          runbook_url: docs/RUNBOOK.md#restore-drill
+
+      # ── host (single server = single failure domain) ──
+      - alert: HostDiskAlmostFull
+        expr: >-
+          node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay|squashfs"}
+          / node_filesystem_size_bytes{mountpoint="/", fstype!~"tmpfs|overlay|squashfs"} < 0.15
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "루트 디스크 여유 {{ $value | humanizePercentage }} — WAL/렌더 산출물/로그 확인"
+
+      - alert: HostDiskWillFillIn24h
+        expr: predict_linear(node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay|squashfs"}[6h], 24 * 3600) < 0
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "현재 추세로 24시간 내 디스크 가득 참"
+
+      - alert: HostMemoryPressure
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "가용 메모리 {{ $value | humanizePercentage }}"
+
+      # ── the monitoring itself ──
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total[10m]) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "Prometheus 규칙 평가 실패 — SLO 경보 신뢰 불가"
+
+      - alert: AlertmanagerNotificationsFailing
+        expr: sum by (integration) (rate(alertmanager_notifications_failed_total[10m])) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Alertmanager 알림 전송 실패 ({{ $labels.integration }}) — secrets/alertmanager/* URL 확인"
+
+      - alert: OtelCollectorExportFailing
+        expr: >-
+          sum(rate(otelcol_exporter_send_failed_log_records_total[10m])) > 0
+          or sum(rate(otelcol_exporter_send_failed_metric_points_total[10m])) > 0
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "OTel Collector 내보내기 실패 (Loki/Prometheus)"

@@ -1,0 +1,72 @@
+# ACVM stage 2 (§9: migrate to k3s at ≥ 1,000 posts/day or multi-workspace sales) — application tier.
+#
+# Assumed cluster add-ons: KEDA ≥ 2.15 (queue-driven autoscaling), External Secrets Operator ≥ 0.17 (Vault →
+# Secrets), metrics-server (HPA), a Prometheus in namespace "monitoring" scraping prometheus.io/* annotations.
+# Data services (PostgreSQL+pgvector, Redis, ClickHouse, Temporal, Vault, OTel collector) live in namespace
+# "acvm-data" (e.g. CloudNativePG + the same configs as deploy/compose); app pods may only reach them through
+# networkpolicies.yaml.
+#
+# Vault: re-run deploy/vault/bootstrap.sh with ACVM_VAULT_BOUND_CIDRS=<pod CIDR, k3s default 10.42.0.0/16> and
+# ACVM_WORKER_PUBLISHES=false once the app routes publishing to acvm-publish; store each AppRole's role_id/secret_id
+# at acvm-k8s/approle/<role> for externalsecrets.yaml. (Alternative: Vault Agent injector with
+# vault.hashicorp.com/agent-inject annotations + Kubernetes auth — requires a Kubernetes-auth VaultSecretStore.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: acvm
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: acvm
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - serviceaccounts.yaml
+  - externalsecrets.yaml
+  - networkpolicies.yaml
+  - migrate-job.yaml
+  - api.yaml
+  - worker.yaml
+  - publisher.yaml
+  - render.yaml
+  - loops.yaml
+  - console.yaml
+  - cloudflared.yaml
+
+configMapGenerator:
+  - name: acvm-config
+    literals:
+      - ACVM_ENV=staging
+      - ACVM_ORCHESTRATOR=temporal
+      - ACVM_TEMPORAL_HOST=temporal-frontend.acvm-data.svc:7233
+      - ACVM_TEMPORAL_NAMESPACE=acvm
+      - ACVM_OTEL_ENDPOINT=http://otel-collector.acvm-data.svc:4318
+      - ACVM_SECURITY__SECRET_BACKEND=vault
+      - ACVM_SECURITY__VAULT_ADDR=http://vault.acvm-data.svc:8200
+      - ACVM_SECURITY__VAULT_MOUNT=acvm
+      - ACVM_SECURITY__AUTH_MODE=cloudflare_access
+      - ACVM_DATA_DIR=/app/var
+      - ACVM_OBJECTS__BACKEND=s3
+      - ACVM_PLATFORMS__DRY_RUN=true
+      - ACVM_COUPANG__SANDBOX=true
+      - TZ=Asia/Seoul
+  - name: cloudflared-config
+    files:
+      - config.yml=cloudflared-config.yml
+
+images:
+  - name: acvm-api
+    newName: ghcr.io/tburn-labs/acvm-api
+    newTag: latest
+  - name: acvm-worker
+    newName: ghcr.io/tburn-labs/acvm-worker
+    newTag: latest
+  - name: acvm-render
+    newName: ghcr.io/tburn-labs/acvm-render
+    newTag: latest
+  - name: acvm-console
+    newName: ghcr.io/tburn-labs/acvm-console
+    newTag: latest
+  - name: cloudflared
+    newName: cloudflare/cloudflared
+    newTag: 2025.9.1

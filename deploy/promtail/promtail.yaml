@@ -1,0 +1,65 @@
+# Promtail — ships container stdout (docker json-file, rotated 5×20 MB) of compose project "acvm" to Loki.
+# ACVM processes log structlog JSON (src/acvm/core/logging.py): level / event / logger / trace_id / timestamp.
+# Only low-cardinality fields become labels; trace_id is structured metadata (Grafana Loki → trace link).
+#
+# Note: Promtail is in maintenance mode upstream; Grafana Alloy is the drop-in successor (`alloy convert
+# --source-format=promtail`). Kept here because the P0 stack spec pins Loki + Promtail.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /run/promtail/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    backoff_config:
+      max_period: 30s
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=acvm"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+      - target_label: env
+        replacement: ${DEPLOYMENT_ENV:-prod}
+    pipeline_stages:
+      # docker_sd reads through the Docker API: lines arrive already unwrapped (no `docker: {}` stage needed)
+      - match:
+          selector: '{service=~"acvm-.*"}'
+          stages:
+            - json:
+                expressions:
+                  level: level
+                  logger: logger
+                  trace_id: trace_id
+                  ts: timestamp
+            - labels:
+                level:
+            - structured_metadata:
+                trace_id:
+                logger:
+            - timestamp:
+                source: ts
+                format: RFC3339Nano
+                action_on_failure: skip
+      - match:
+          selector: '{service="vault"}'
+          stages:
+            - json:
+                expressions:
+                  vault_type: type
+            - labels:
+                vault_type:

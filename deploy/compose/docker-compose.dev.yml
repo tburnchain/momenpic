@@ -1,0 +1,125 @@
+# Local development override — same topology as production, laptop-friendly:
+#   docker compose --env-file dev.env -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#   (or: make up)
+#
+# Differences from prod: images built from source, ports published on 127.0.0.1, Vault in dev mode (in-memory,
+# auto-unsealed, root token "dev-root-token"), secrets from env (ACVM_SECRET__*), auth_mode=dev,
+# ACVM_PLATFORMS__DRY_RUN=true and ACVM_COUPANG__SANDBOX=true (nothing is ever posted or called for real),
+# local object store served by the API at /media, no WAL archiving, no tunnel, alerts not sent.
+# Requires Docker Compose ≥ 2.24 (!override / !reset).
+
+x-dev-app-env: &dev-app-env
+  ACVM_ENV: dev
+  ACVM_SECURITY__SECRET_BACKEND: env
+  ACVM_SECURITY__AUTH_MODE: dev
+  ACVM_PLATFORMS__DRY_RUN: "true"
+  ACVM_COUPANG__SANDBOX: "true"
+  ACVM_OBJECTS__BACKEND: local
+  ACVM_OBJECTS__PUBLIC_BASE_URL: http://localhost:8000/media
+  ACVM_LINK_HUB_BASE_URL: http://localhost:8000
+  ACVM_SECRET__ACVM__LINK_SIGNING_KEY: dev-link-signing-key-not-for-production
+  ACVM_SECRET__ACVM__CLICK_IP_SALT: dev-click-ip-salt
+
+x-dev-build: &dev-build
+  context: ../..
+  dockerfile: deploy/docker/Dockerfile
+
+services:
+  postgres:
+    env_file: !reset []
+    environment:
+      WALG_ENABLED: "false"
+    ports: ["127.0.0.1:5432:5432"]
+
+  redis:
+    ports: ["127.0.0.1:6379:6379"]
+
+  clickhouse:
+    ports: ["127.0.0.1:8123:8123", "127.0.0.1:9000:9000"]
+
+  temporal:
+    ports: ["127.0.0.1:7233:7233"]
+
+  vault:
+    command: ["server", "-dev"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-root-token
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_TOKEN: dev-root-token
+    volumes: !override
+      - ../vault:/vault/acvm:ro
+    ports: ["127.0.0.1:8200:8200"]
+
+  acvm-migrate:
+    build: {<<: *dev-build, target: worker}
+    image: acvm-worker:dev
+    env_file: !override [{path: ../../.env, required: false}]
+    environment: *dev-app-env
+
+  acvm-api:
+    build: {<<: *dev-build, target: api}
+    image: acvm-api:dev
+    env_file: !override [{path: ../../.env, required: false}]
+    environment: *dev-app-env
+    ports: ["127.0.0.1:8000:8000"]
+
+  acvm-worker:
+    build: {<<: *dev-build, target: render}
+    image: acvm-render:dev
+    env_file: !override [{path: ../../.env, required: false}]
+    environment: *dev-app-env
+
+  acvm-publisher:
+    build: {<<: *dev-build, target: worker}
+    image: acvm-worker:dev
+    env_file: !override [{path: ../../.env, required: false}]
+    environment: *dev-app-env
+
+  acvm-render:
+    build: {<<: *dev-build, target: render}
+    image: acvm-render:dev
+    env_file: !override [{path: ../../.env, required: false}]
+    environment: *dev-app-env
+
+  acvm-loops:
+    build: {<<: *dev-build, target: worker}
+    image: acvm-worker:dev
+    env_file: !override [{path: ../../.env, required: false}]
+    environment: *dev-app-env
+
+  console:
+    image: acvm-console:dev
+    environment:
+      ACVM_API_URL: http://acvm-api:8000
+    ports: ["127.0.0.1:3000:3000"]
+
+  cloudflared:
+    profiles: [tunnel]          # not started in dev; `--profile tunnel` to test a dev tunnel
+
+  grafana:
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:3001
+      GF_SECURITY_COOKIE_SECURE: "false"
+      GF_AUTH_JWT_ENABLED: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports: ["127.0.0.1:3001:3000"]
+
+  prometheus:
+    ports: ["127.0.0.1:9090:9090"]
+
+  alertmanager:
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.dev.yml
+      - --storage.path=/alertmanager
+    volumes: !override
+      - amdata:/alertmanager
+      - ../alertmanager:/etc/alertmanager:ro
+    ports: ["127.0.0.1:9093:9093"]
+
+  loki:
+    ports: ["127.0.0.1:3100:3100"]
+
+networks:
+  backend:
+    internal: false             # published ports need a non-internal network

@@ -1,0 +1,27 @@
+# Production tunnel ingress — replace example.com hostnames, tunnel UUID, Access team and AUD tags.
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /etc/cloudflared/creds/credentials.json
+metrics: 0.0.0.0:2000
+no-autoupdate: true
+ingress:
+  # public: link hub + /r redirects only (media is served from R2 signed URLs, not through the tunnel)
+  - hostname: go.example.com
+    path: ^/(hub|r)/
+    service: http://acvm-api.acvm.svc:8000
+  - hostname: go.example.com
+    service: http_status:404
+  # Cloudflare Access (SSO) — cloudflared re-validates the Access JWT
+  - hostname: console.example.com
+    path: ^/api/v1/
+    service: http://acvm-api.acvm.svc:8000
+    originRequest:
+      access: {required: true, teamName: example, audTag: ["console-aud"]}
+  - hostname: console.example.com
+    service: http://acvm-console.acvm.svc:3000
+    originRequest:
+      access: {required: true, teamName: example, audTag: ["console-aud"]}
+  - hostname: grafana.example.com
+    service: http://grafana.monitoring.svc:80
+    originRequest:
+      access: {required: true, teamName: example, audTag: ["grafana-aud"]}
+  - service: http_status:404

@@ -1,0 +1,185 @@
+name: release
+
+# §10 공급망: images are built with buildx from digest-pinned bases, scanned with Trivy (HIGH/CRITICAL fail the
+# release BEFORE anything is pushed), described by an SPDX SBOM (syft), pushed to GHCR and signed keyless with
+# cosign (GitHub OIDC → Fulcio/Rekor). Deploy hosts verify with `cosign verify` (docs/DEPLOY.md).
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version tag to publish (e.g. 1.0.1); defaults to the git ref name"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+  PYTHON_BASE: python:3.12-slim-bookworm
+  UV_BASE: ghcr.io/astral-sh/uv:0.12.5
+  PGVECTOR_BASE: pgvector/pgvector:0.8.1-pg16-bookworm
+
+jobs:
+  images:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write          # cosign keyless
+      security-events: write   # Trivy SARIF → code scanning
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {name: acvm-api, context: ., file: deploy/docker/Dockerfile, target: api}
+          - {name: acvm-worker, context: ., file: deploy/docker/Dockerfile, target: worker}
+          - {name: acvm-render, context: ., file: deploy/docker/Dockerfile, target: render}
+          - {name: acvm-console, context: console, file: console/Dockerfile, target: ""}
+          - {name: acvm-postgres, context: deploy/postgres, file: deploy/postgres/Dockerfile, target: ""}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: version
+        id: v
+        run: |
+          v="${{ inputs.version }}"; [ -n "$v" ] || v="${GITHUB_REF_NAME#v}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: pin base images by digest
+        id: bases
+        run: |
+          digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -r .digest; }
+          echo "python=$(digest "$PYTHON_BASE")" >> "$GITHUB_OUTPUT"
+          echo "uv=$(digest "$UV_BASE")" >> "$GITHUB_OUTPUT"
+          echo "pgvector=$(digest "$PGVECTOR_BASE")" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.v.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.v.outputs.version }}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ matrix.name }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+
+      - name: build (local, for scanning)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: scan/${{ matrix.name }}:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PYTHON_DIGEST=${{ steps.bases.outputs.python }}
+            UV_DIGEST=${{ steps.bases.outputs.uv }}
+            PGVECTOR_DIGEST=${{ steps.bases.outputs.pgvector }}
+            WALG_SHA256=${{ vars.WALG_SHA256 }}
+            VERSION=${{ steps.v.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.created }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+      - name: Trivy (SARIF report)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: scan/${{ matrix.name }}:${{ github.sha }}
+          format: sarif
+          output: trivy-${{ matrix.name }}.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-${{ matrix.name }}.sarif
+          category: trivy-${{ matrix.name }}
+
+      - name: Trivy gate (fail on HIGH/CRITICAL with a fix available)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: scan/${{ matrix.name }}:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build & push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PYTHON_DIGEST=${{ steps.bases.outputs.python }}
+            UV_DIGEST=${{ steps.bases.outputs.uv }}
+            PGVECTOR_DIGEST=${{ steps.bases.outputs.pgvector }}
+            WALG_SHA256=${{ vars.WALG_SHA256 }}
+            VERSION=${{ steps.v.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.created }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+
+      - name: SBOM (syft, SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+          upload-artifact: true
+          upload-release-assets: false
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: cosign sign + attest SBOM (keyless)
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}@${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "$IMAGE"
+          cosign attest --yes --type spdxjson --predicate "sbom-${{ matrix.name }}.spdx.json" "$IMAGE"
+
+      - name: cosign verify
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}@${{ steps.push.outputs.digest }}
+        run: |
+          cosign verify "$IMAGE" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@" \
+            > /dev/null
+          echo "### ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$IMAGE\` — signed, SBOM attested" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,29 @@
+# Optional distributed tracing (Tempo). Adds tempo, routes collector traces to it and provisions the Grafana
+# datasource:  docker compose -f docker-compose.yml -f docker-compose.tracing.yml up -d
+services:
+  tempo:
+    image: grafana/tempo:${TEMPO_VERSION:-2.8.2}
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    restart: unless-stopped
+    volumes:
+      - ../otel/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempodata:/var/tempo
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 2g}
+
+  otel-collector:
+    command: ["--config=/etc/otelcol/collector.yaml", "--config=/etc/otelcol/collector.tempo.yaml"]
+    volumes:
+      - ../otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+      - ../otel/collector.tempo.yaml:/etc/otelcol/collector.tempo.yaml:ro
+    depends_on:
+      tempo: {condition: service_started}
+
+  grafana:
+    volumes:
+      - ../grafana/optional/tempo-datasource.yml:/etc/grafana/provisioning/datasources/tempo.yml:ro
+
+volumes:
+  tempodata:

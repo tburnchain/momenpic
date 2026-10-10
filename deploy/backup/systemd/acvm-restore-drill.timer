@@ -1,0 +1,9 @@
+[Unit]
+Description=ACVM restore drill — first Sunday of every month, 05:00 KST
+
+[Timer]
+OnCalendar=Sun *-*-01..07 05:00:00 Asia/Seoul
+Persistent=true
+
+[Install]
+WantedBy=timers.target

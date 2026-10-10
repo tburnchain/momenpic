@@ -1,0 +1,56 @@
+# Grafana datasources. Passwords are expanded from the grafana container's environment
+# (compose: GRAFANA_DB_PASSWORD, CLICKHOUSE_GRAFANA_PASSWORD) — never stored here.
+# UIDs are referenced by the dashboards in deploy/grafana/dashboards — do not rename.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 2000
+
+  - name: ACVM PostgreSQL
+    uid: acvm-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_ro
+    editable: false
+    jsonData:
+      database: acvm
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}
+
+  - name: ACVM ClickHouse
+    uid: acvm-clickhouse
+    type: grafana-clickhouse-datasource
+    editable: false
+    jsonData:
+      host: clickhouse
+      port: 8123
+      protocol: http
+      secure: false
+      username: grafana_ro
+      defaultDatabase: acvm
+    secureJsonData:
+      password: ${CLICKHOUSE_GRAFANA_PASSWORD}

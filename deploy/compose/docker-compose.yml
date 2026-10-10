@@ -1,0 +1,646 @@
+# ACVM — single-server P0/P1 deployment (§9: one Contabo server, Docker Compose).
+#
+#   cd deploy/compose
+#   cp .env.example .env && cp ../../.env.example env/acvm.env      # then fill in (docs/DEPLOY.md)
+#   docker compose build postgres && docker compose pull
+#   docker compose up -d
+#
+# Networks (§10 네트워크):
+#   backend  internal, no egress, no published ports — every data store, Vault, observability, ACVM processes
+#   edge     cloudflared ↔ acvm-api / console / grafana (the only things reachable through the tunnel)
+#   egress   outbound internet for ACVM processes that call Coupang / Meta / YouTube / TikTok / Anthropic / R2,
+#            for postgres/clickhouse backups to R2, and for alert delivery
+#   ops      loopback-only admin UI (temporal-ui on 127.0.0.1:8088 → SSH tunnel)
+# Public surface = Cloudflare Tunnel routes /hub/* and /r/* (+ /media/* in local-object mode) and R2 signed URLs;
+# console, /api/v1/* and Grafana are only reachable through Cloudflare Access (SSO).
+#
+# Secrets: env files under ./env (chmod 600, git-ignored) and ./secrets — never baked into images.
+#   .env                    compose interpolation: image tags, hostnames, infra passwords
+#   env/acvm.env            ACVM_* application settings (template: /.env.example)
+#   env/approle-*.env       Vault AppRole credentials: api, worker, publisher, render, loops
+#                           (docker compose exec -T -e VAULT_TOKEN vault sh /vault/acvm/bootstrap.sh credentials acvm-<role>)
+#   env/llm.env             ANTHROPIC_API_KEY (until the LLM key is resolved through Vault)
+#   env/walg.env            WAL-G → R2 (template: deploy/backup/walg.env.example)
+#   secrets/cloudflared-credentials.json, secrets/alertmanager/{page,ticket}_webhook_url
+
+name: acvm
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+    tag: "{{.Name}}"
+
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+# Infra endpoints are pinned here (compose `environment` wins over env_file), app tunables come from env/acvm.env.
+x-acvm-env: &acvm-env
+  ACVM_ENV: ${ACVM_ENV:-prod}
+  ACVM_DATABASE_URL: postgresql+asyncpg://acvm:${ACVM_DB_PASSWORD:?set ACVM_DB_PASSWORD in .env}@postgres:5432/acvm
+  ACVM_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
+  ACVM_CLICKHOUSE_URL: http://acvm:${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}@clickhouse:8123/acvm
+  ACVM_ORCHESTRATOR: temporal
+  ACVM_TEMPORAL_HOST: temporal:7233
+  ACVM_TEMPORAL_NAMESPACE: acvm
+  ACVM_OTEL_ENDPOINT: http://otel-collector:4318
+  ACVM_SECURITY__SECRET_BACKEND: ${ACVM_SECRET_BACKEND:-vault}
+  ACVM_SECURITY__VAULT_ADDR: http://vault:8200
+  ACVM_SECURITY__VAULT_MOUNT: acvm
+  ACVM_LINK_HUB_BASE_URL: https://${ACVM_HUB_HOST:?set ACVM_HUB_HOST in .env}
+  ACVM_DATA_DIR: /app/var
+  TZ: Asia/Seoul
+
+x-acvm-app: &acvm-app
+  <<: *hardening
+  image: ${ACVM_REGISTRY:-ghcr.io/tburn-labs}/acvm-worker:${ACVM_VERSION:-latest}
+  restart: unless-stopped
+  logging: *logging
+  read_only: true
+  tmpfs: ["/tmp:size=256m,mode=1777"]
+  volumes: ["acvm-var:/app/var"]
+  stop_grace_period: 60s
+  networks: [backend, egress]
+  depends_on: &acvm-deps
+    acvm-migrate: {condition: service_completed_successfully}
+    redis: {condition: service_healthy}
+    clickhouse: {condition: service_healthy}
+    vault: {condition: service_healthy}
+    temporal: {condition: service_healthy}
+    otel-collector: {condition: service_started}
+
+services:
+  # ═══════════════════════════ data stores ═══════════════════════════
+  postgres:
+    build:
+      context: ../postgres
+      args:
+        WALG_SHA256: ${WALG_SHA256:-}
+    image: ${ACVM_REGISTRY:-ghcr.io/tburn-labs}/acvm-postgres:${ACVM_POSTGRES_TAG:-16-walg}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    restart: unless-stopped
+    logging: *logging
+    shm_size: 1g
+    stop_grace_period: 120s
+    env_file:
+      - path: ./env/walg.env
+        required: true
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
+      POSTGRES_DB: postgres
+      POSTGRES_INITDB_ARGS: "--data-checksums --encoding=UTF8 --locale=C.UTF-8"
+      PGDATA: /var/lib/postgresql/data/pgdata
+      ACVM_DB_PASSWORD: ${ACVM_DB_PASSWORD}
+      TEMPORAL_DB_PASSWORD: ${TEMPORAL_DB_PASSWORD:?set TEMPORAL_DB_PASSWORD in .env}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?set GRAFANA_DB_PASSWORD in .env}
+      MONITOR_DB_PASSWORD: ${MONITOR_DB_PASSWORD:?set MONITOR_DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ../postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d acvm -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    networks: [backend, egress]   # egress only for WAL-G → R2 (no published ports)
+    deploy:
+      resources:
+        limits: {cpus: "4", memory: 10g}
+
+  redis:
+    image: redis:${REDIS_VERSION:-7.4-alpine}
+    command: ["sh", "-c", "exec redis-server /usr/local/etc/redis/redis.conf --requirepass \"$$REDIS_PASSWORD\""]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+      - ../redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 3g}
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.8}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      CLICKHOUSE_DB: acvm
+      CLICKHOUSE_USER: acvm
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      CLICKHOUSE_GRAFANA_PASSWORD: ${CLICKHOUSE_GRAFANA_PASSWORD:?set CLICKHOUSE_GRAFANA_PASSWORD in .env}
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ../clickhouse/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+      - ./initdb/clickhouse/20-grafana-readonly.sh:/docker-entrypoint-initdb.d/20-grafana-readonly.sh:ro
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks: [backend, egress]   # egress only for BACKUP ... TO S3 (R2)
+    deploy:
+      resources:
+        limits: {cpus: "3", memory: 8g}
+
+  # ═══════════════════════════ orchestration & secrets ═══════════════════════════
+  temporal:
+    image: temporalio/auto-setup:${TEMPORAL_VERSION:-1.28.1}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_DB_PASSWORD}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      DEFAULT_NAMESPACE: acvm
+      DEFAULT_NAMESPACE_RETENTION: 168h
+      PROMETHEUS_ENDPOINT: 0.0.0.0:9090
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/acvm.yaml
+      LOG_LEVEL: warn
+    volumes:
+      - ../temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/acvm.yaml:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 2>/dev/null | grep -q SERVING || tctl --address temporal:7233 cluster health | grep -q SERVING"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "2", memory: 2g}
+
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-2.40.1}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_DEFAULT_NAMESPACE: acvm
+      TEMPORAL_UI_PORT: "8080"
+    depends_on:
+      temporal: {condition: service_healthy}
+    ports: ["127.0.0.1:8088:8080"]   # internal only — reach it with `ssh -L 8088:127.0.0.1:8088 server`
+    networks: [backend, ops]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256m}
+
+  vault:
+    image: hashicorp/vault:${VAULT_VERSION:-1.20.4}
+    command: ["server"]
+    restart: unless-stopped
+    logging: *logging
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+      ACVM_VAULT_BOUND_CIDRS: ${ACVM_BACKEND_SUBNET:-172.30.10.0/24}
+    volumes:
+      - vaultdata:/vault/file
+      - ../vault/config/vault.hcl:/vault/config/vault.hcl:ro
+      - ../vault:/vault/acvm:ro                       # policies + bootstrap.sh
+    healthcheck:   # healthy only when initialised AND unsealed — app services wait for the manual unseal
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256m}
+
+  # ═══════════════════════════ ACVM application ═══════════════════════════
+  acvm-migrate:
+    <<: *acvm-app
+    restart: "no"
+    command: ["acvm", "db", "upgrade"]
+    env_file:
+      - path: ./env/acvm.env
+        required: true
+    environment:
+      <<: *acvm-env
+      OTEL_SERVICE_NAME: acvm-migrate
+    healthcheck: {disable: true}
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 512m}
+
+  acvm-api:
+    <<: *acvm-app
+    image: ${ACVM_REGISTRY:-ghcr.io/tburn-labs}/acvm-api:${ACVM_VERSION:-latest}
+    env_file:
+      - path: ./env/acvm.env
+        required: true
+      - path: ./env/approle-api.env
+        required: true
+      - path: ./env/llm.env
+        required: false
+    environment:
+      <<: *acvm-env
+      OTEL_SERVICE_NAME: acvm-api
+      ACVM_SECURITY__AUTH_MODE: cloudflare_access
+      ACVM_SECURITY__CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      ACVM_SECURITY__CF_ACCESS_AUDIENCE: ${CF_ACCESS_CONSOLE_AUD:-}
+      FORWARDED_ALLOW_IPS: ${ACVM_EDGE_SUBNET:-172.30.30.0/24}   # uvicorn trusts X-Forwarded-* only from cloudflared
+    depends_on:
+      acvm-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      vault: {condition: service_healthy}
+      temporal: {condition: service_started}   # the hub must serve even if Temporal is degraded
+      otel-collector: {condition: service_started}
+    networks: [backend, edge]
+    deploy:
+      resources:
+        limits: {cpus: "2", memory: 1g}
+
+  # Temporal worker, task queue acvm-main: CommandWorkflow + bookkeeping activities only. produce_product is
+  # routed to acvm-render and PublishWorkflow to acvm-publish (CommandInput carries the queue names), so this
+  # worker needs neither ffmpeg nor social tokens (bootstrap.sh: ACVM_WORKER_PUBLISHES=false).
+  acvm-worker:
+    <<: *acvm-app
+    image: ${ACVM_REGISTRY:-ghcr.io/tburn-labs}/acvm-worker:${ACVM_VERSION:-latest}
+    command: ["python", "-m", "acvm.orchestration.worker"]
+    tmpfs: ["/tmp:size=2g,mode=1777"]
+    env_file:
+      - path: ./env/acvm.env
+        required: true
+      - path: ./env/approle-worker.env
+        required: true
+      - path: ./env/llm.env
+        required: false
+    environment:
+      <<: *acvm-env
+      OTEL_SERVICE_NAME: acvm-worker
+      ACVM_TEMPORAL_TASK_QUEUE: acvm-main
+    deploy:
+      resources:
+        limits: {cpus: "4", memory: 4g}
+
+  # Publish worker (task queue acvm-publish) — the only process class with the acvm-publisher Vault role.
+  # acvm-loops starts scheduled PublishWorkflows on this queue (ACVM_TEMPORAL_TASK_QUEUE below).
+  acvm-publisher:
+    <<: *acvm-app
+    command: ["python", "-m", "acvm.orchestration.worker", "--queue", "acvm-publish"]
+    env_file:
+      - path: ./env/acvm.env
+        required: true
+      - path: ./env/approle-publisher.env
+        required: true
+    environment:
+      <<: *acvm-env
+      OTEL_SERVICE_NAME: acvm-publisher
+      ACVM_TEMPORAL_TASK_QUEUE: acvm-publish
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 1g}
+
+  # Render worker (task queue acvm-render, ffmpeg + Noto CJK). M6 target: 30 s video ≤ 60 s CPU, 8 concurrent.
+  acvm-render:
+    <<: *acvm-app
+    image: ${ACVM_REGISTRY:-ghcr.io/tburn-labs}/acvm-render:${ACVM_VERSION:-latest}
+    command: ["python", "-m", "acvm.orchestration.worker", "--queue", "acvm-render"]
+    tmpfs: ["/tmp:size=2g,mode=1777"]
+    env_file:
+      - path: ./env/acvm.env
+        required: true
+      - path: ./env/approle-render.env
+        required: true
+    environment:
+      <<: *acvm-env
+      OTEL_SERVICE_NAME: acvm-render
+      ACVM_TEMPORAL_TASK_QUEUE: acvm-render
+    deploy:
+      resources:
+        limits: {cpus: "6", memory: 8g}
+
+  # Periodic loops: outbox relay, publish scheduler, insights (hourly), reports (daily), link health (6 h),
+  # invalid-click scan, retention. Leader-elected in Redis; keep exactly one replica.
+  acvm-loops:
+    <<: *acvm-app
+    command: ["python", "-m", "acvm.orchestration.loops"]
+    env_file:
+      - path: ./env/acvm.env
+        required: true
+      - path: ./env/approle-loops.env
+        required: true
+      - path: ./env/llm.env
+        required: false
+    environment:
+      <<: *acvm-env
+      OTEL_SERVICE_NAME: acvm-loops
+      ACVM_TEMPORAL_TASK_QUEUE: acvm-main         # recurring commands → CommandWorkflow on acvm-main
+      ACVM_TEMPORAL_PUBLISH_QUEUE: acvm-publish   # scheduled PublishWorkflows → acvm-publisher
+    deploy:
+      replicas: 1
+      resources:
+        limits: {cpus: "1", memory: 1g}
+
+  console:
+    build: ../../console
+    image: ${ACVM_REGISTRY:-ghcr.io/tburn-labs}/acvm-console:${ACVM_VERSION:-latest}
+    restart: unless-stopped
+    logging: *logging
+    <<: *hardening
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      ACVM_API_URL: http://acvm-api:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      acvm-api: {condition: service_healthy}
+    networks: [edge]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 1g}
+
+  cloudflared:
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:-2025.9.1}
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
+    restart: unless-stopped
+    logging: *logging
+    <<: *hardening
+    configs:
+      - source: cloudflared-config
+        target: /etc/cloudflared/config.yml
+    volumes:
+      - ./secrets/cloudflared-credentials.json:/etc/cloudflared/credentials.json:ro
+    depends_on:
+      acvm-api: {condition: service_healthy}
+      console: {condition: service_started}
+      grafana: {condition: service_started}
+    networks: [edge]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256m}
+
+  # ═══════════════════════════ observability ═══════════════════════════
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTELCOL_VERSION:-0.135.0}
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DEPLOYMENT_ENV: ${ACVM_ENV:-prod}
+    volumes:
+      - ../otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 1g}
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=20GB
+      - --web.enable-lifecycle
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - promdata:/prometheus
+      - ../prometheus:/etc/prometheus:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 2g}
+
+  alertmanager:
+    image: prom/alertmanager:${ALERTMANAGER_VERSION:-v0.28.1}
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - amdata:/alertmanager
+      - ../alertmanager:/etc/alertmanager:ro
+      - ./secrets/alertmanager:/etc/alertmanager/secrets:ro
+    networks: [backend, egress]
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 128m}
+
+  pushgateway:
+    image: prom/pushgateway:${PUSHGATEWAY_VERSION:-v1.11.1}
+    command: ["--persistence.file=/data/pushgateway.db", "--persistence.interval=1m"]
+    restart: unless-stopped
+    logging: *logging
+    volumes: ["pushgateway-data:/data"]
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 128m}
+
+  grafana:
+    image: grafana/grafana-oss:${GRAFANA_VERSION:-12.2.0}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      GF_SERVER_ROOT_URL: https://${ACVM_GRAFANA_HOST:-grafana.example.com}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL: grafana-clickhouse-datasource
+      # Cloudflare Access JWT → Grafana users (SSO); the tunnel also enforces Access (originRequest.access)
+      GF_AUTH_JWT_ENABLED: ${GRAFANA_JWT_ENABLED:-true}
+      GF_AUTH_JWT_HEADER_NAME: Cf-Access-Jwt-Assertion
+      GF_AUTH_JWT_EMAIL_CLAIM: email
+      GF_AUTH_JWT_USERNAME_CLAIM: email
+      GF_AUTH_JWT_JWK_SET_URL: https://${CF_ACCESS_TEAM_DOMAIN:-example.cloudflareaccess.com}/cdn-cgi/access/certs
+      GF_AUTH_JWT_EXPECT_CLAIMS: '{"aud":["${CF_ACCESS_GRAFANA_AUD:-unset}"]}'
+      GF_AUTH_JWT_AUTO_SIGN_UP: "true"
+      GF_AUTH_JWT_ROLE_ATTRIBUTE_PATH: "email == '${GRAFANA_ADMIN_EMAIL:-nobody@example.com}' && 'Admin' || 'Viewer'"
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      CLICKHOUSE_GRAFANA_PASSWORD: ${CLICKHOUSE_GRAFANA_PASSWORD}
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: {condition: service_healthy}
+      loki: {condition: service_started}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks: [backend, edge]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 1g}
+
+  loki:
+    image: grafana/loki:${LOKI_VERSION:-3.5.5}
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - lokidata:/loki
+      - ../loki/loki.yaml:/etc/loki/loki.yaml:ro
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 2g}
+
+  promtail:
+    image: grafana/promtail:${PROMTAIL_VERSION:-3.5.5}
+    command: ["-config.file=/etc/promtail/promtail.yaml", "-config.expand-env=true"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DEPLOYMENT_ENV: ${ACVM_ENV:-prod}
+    volumes:
+      - ../promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro    # read-only discovery; see docs/SECURITY.md
+      - promtail-positions:/run/promtail
+    depends_on:
+      loki: {condition: service_started}
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256m}
+
+  node-exporter:
+    image: prom/node-exporter:${NODE_EXPORTER_VERSION:-v1.9.1}
+    command: ["--path.rootfs=/host", "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($|/)"]
+    restart: unless-stopped
+    logging: *logging
+    pid: host
+    volumes: ["/:/host:ro,rslave"]
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 128m}
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:${POSTGRES_EXPORTER_VERSION:-v0.17.1}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DATA_SOURCE_URI: postgres:5432/acvm?sslmode=disable
+      DATA_SOURCE_USER: acvm_monitor
+      DATA_SOURCE_PASS: ${MONITOR_DB_PASSWORD}
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 128m}
+
+  redis-exporter:
+    image: oliver006/redis_exporter:${REDIS_EXPORTER_VERSION:-v1.74.0}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    depends_on:
+      redis: {condition: service_healthy}
+    networks: [backend]
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 128m}
+
+# Cloudflare Tunnel ingress (locally managed tunnel → rules are versioned here and rendered with .env values).
+# Order matters: first match wins. Public = link hub only; everything admin sits behind Cloudflare Access and
+# cloudflared itself re-validates the Access JWT (originRequest.access) as defence in depth.
+configs:
+  cloudflared-config:
+    content: |
+      tunnel: ${CLOUDFLARE_TUNNEL_ID:-unset}
+      credentials-file: /etc/cloudflared/credentials.json
+      metrics: 0.0.0.0:2000
+      no-autoupdate: true
+      ingress:
+        - hostname: ${ACVM_HUB_HOST}
+          path: ^/(hub|r)/
+          service: http://acvm-api:8000
+        - hostname: ${ACVM_HUB_HOST}
+          path: ^/media/
+          service: http://acvm-api:8000
+        - hostname: ${ACVM_HUB_HOST}
+          service: http_status:404
+        - hostname: ${ACVM_CONSOLE_HOST:-console.example.com}
+          path: ^/api/v1/
+          service: http://acvm-api:8000
+          originRequest:
+            access: {required: true, teamName: "${CF_ACCESS_TEAM_NAME:-unset}", audTag: ["${CF_ACCESS_CONSOLE_AUD:-unset}"]}
+        - hostname: ${ACVM_CONSOLE_HOST:-console.example.com}
+          service: http://console:3000
+          originRequest:
+            access: {required: true, teamName: "${CF_ACCESS_TEAM_NAME:-unset}", audTag: ["${CF_ACCESS_CONSOLE_AUD:-unset}"]}
+        - hostname: ${ACVM_GRAFANA_HOST:-grafana.example.com}
+          service: http://grafana:3000
+          originRequest:
+            access: {required: true, teamName: "${CF_ACCESS_TEAM_NAME:-unset}", audTag: ["${CF_ACCESS_GRAFANA_AUD:-unset}"]}
+        - service: http_status:404
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config: [{subnet: "${ACVM_BACKEND_SUBNET:-172.30.10.0/24}"}]
+  egress:
+    ipam:
+      config: [{subnet: "${ACVM_EGRESS_SUBNET:-172.30.20.0/24}"}]
+  edge:
+    ipam:
+      config: [{subnet: "${ACVM_EDGE_SUBNET:-172.30.30.0/24}"}]
+  ops:
+    ipam:
+      config: [{subnet: "${ACVM_OPS_SUBNET:-172.30.40.0/24}"}]
+
+volumes:
+  pgdata:
+  redisdata:
+  chdata:
+  vaultdata:
+  promdata:
+  amdata:
+  grafanadata:
+  lokidata:
+  promtail-positions:
+  pushgateway-data:
+  acvm-var:

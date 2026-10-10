@@ -1,0 +1,5 @@
+# Dev override: alerts are visible in the Alertmanager/Grafana UIs but never sent anywhere.
+route:
+  receiver: "null"
+receivers:
+  - name: "null"

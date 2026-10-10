@@ -1,0 +1,97 @@
+# acvm-worker — Temporal worker on task queue acvm-main (commands: select → produce → gate → finalize).
+# Scaled by KEDA on the Temporal task-queue backlog (server metric approximate_backlog_count, scraped by Prometheus).
+# Stage 2 assumes the queue split is done in the app (render activities → acvm-render, PublishWorkflow →
+# acvm-publish). Until then use image acvm-render here and the acvm-worker AppRole with publisher policy, exactly
+# like the compose interim setup (docs/SECURITY.md "큐 분리").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acvm-worker
+  labels: {app.kubernetes.io/name: acvm-worker, acvm.io/tier: app}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: {app.kubernetes.io/name: acvm-worker}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: acvm-worker, acvm.io/tier: app, acvm.io/egress: internet}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: acvm-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120   # let in-flight activities finish (Temporal graceful shutdown)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: wait-for-migrations
+          image: acvm-worker
+          command: ["python", "-m", "acvm.db.migrations", "wait", "--timeout", "900"]
+          envFrom:
+            - secretRef: {name: acvm-runtime}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      containers:
+        - name: worker
+          image: acvm-worker
+          command: ["python", "-m", "acvm.orchestration.worker"]
+          ports:
+            - {name: metrics, containerPort: 9464}
+          envFrom:
+            - configMapRef: {name: acvm-config}
+            - secretRef: {name: acvm-runtime}
+            - secretRef: {name: acvm-approle-worker}
+          env:
+            - {name: OTEL_SERVICE_NAME, value: acvm-worker}
+            - {name: ACVM_TEMPORAL_TASK_QUEUE, value: acvm-main}
+          livenessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            periodSeconds: 30
+            failureThreshold: 4
+          resources:
+            requests: {cpu: 500m, memory: 768Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: var, mountPath: /app/var}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 2Gi}
+        - name: var
+          emptyDir: {sizeLimit: 5Gi}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: acvm-worker
+spec:
+  scaleTargetRef: {name: acvm-worker}
+  minReplicaCount: 2
+  maxReplicaCount: 6
+  pollingInterval: 30
+  cooldownPeriod: 300
+  fallback: {failureThreshold: 3, replicas: 2}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: sum(approximate_backlog_count{namespace="acvm", taskqueue="acvm-main"}) or vector(0)
+        threshold: "16"
+    - type: cpu
+      metricType: Utilization
+      metadata: {value: "75"}

@@ -1,0 +1,15 @@
+# Overlay merged after collector.yaml when the tracing profile is used (docker-compose.tracing.yml):
+# traces go to Tempo instead of the debug exporter.
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+
+service:
+  pipelines:
+    traces:
+      exporters: [otlp/tempo]

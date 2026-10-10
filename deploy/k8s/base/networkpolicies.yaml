@@ -1,0 +1,164 @@
+# §10 네트워크 — default deny, then allow exactly the flows the design needs:
+#   internet → (Cloudflare) → cloudflared → acvm-api:8000 (/hub, /r public; /api/v1 behind Access) / console:3000
+#   app pods → acvm-data namespace (PostgreSQL, Redis, ClickHouse, Temporal, Vault, OTel collector)
+#   app pods labelled acvm.io/egress=internet → public internet :443 only (Coupang, Meta, Google, TikTok, Anthropic, R2)
+#   monitoring namespace → metrics ports
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: acvm-api}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: cloudflared}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: acvm-console}
+      ports:
+        - {protocol: TCP, port: 8000}
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+      ports:
+        - {protocol: TCP, port: 8000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: acvm-console}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: cloudflared}
+      ports:
+        - {protocol: TCP, port: 3000}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: acvm-api}
+      ports:
+        - {protocol: TCP, port: 8000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workers-metrics-ingress
+spec:
+  podSelector:
+    matchLabels: {acvm.io/tier: app}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+      ports:
+        - {protocol: TCP, port: 9464}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-egress-data
+spec:
+  podSelector:
+    matchLabels: {acvm.io/tier: app}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: acvm-data}
+      ports:
+        - {protocol: TCP, port: 5432}   # PostgreSQL
+        - {protocol: TCP, port: 6379}   # Redis
+        - {protocol: TCP, port: 8123}   # ClickHouse HTTP
+        - {protocol: TCP, port: 7233}   # Temporal frontend
+        - {protocol: TCP, port: 8200}   # Vault
+        - {protocol: TCP, port: 4318}   # OTLP/HTTP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-egress-internet
+spec:
+  podSelector:
+    matchLabels: {acvm.io/egress: internet}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports:
+        - {protocol: TCP, port: 443}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: cloudflared}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+      ports:
+        - {protocol: TCP, port: 2000}
+  egress:
+    - to:   # Cloudflare edge (tunnel: 7844 TCP/UDP; API/Access certs: 443)
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports:
+        - {protocol: TCP, port: 7844}
+        - {protocol: UDP, port: 7844}
+        - {protocol: TCP, port: 443}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: acvm-api}
+      ports:
+        - {protocol: TCP, port: 8000}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: acvm-console}
+      ports:
+        - {protocol: TCP, port: 3000}
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: grafana}
+      ports:
+        - {protocol: TCP, port: 3000}

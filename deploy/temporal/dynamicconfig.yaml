@@ -1,0 +1,17 @@
+# Temporal dynamic config (mounted at /etc/temporal/config/dynamicconfig/acvm.yaml).
+# Defaults are fine for P0; these keep payloads/history bounded for long-running schedule workflows (§5.2).
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+limit.blobSize.error:
+  - value: 2097152
+    constraints: {}
+limit.historyCount.warn:
+  - value: 10000
+    constraints: {}
+frontend.enableUpdateWorkflowExecution:
+  - value: true
+    constraints: {}
+system.enableEagerWorkflowStart:
+  - value: true
+    constraints: {}

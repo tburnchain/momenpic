@@ -1,0 +1,11 @@
+[Unit]
+Description=ACVM monthly restore drill (throw-away container; verifies RPO/RTO, pushes metrics)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/acvm
+ExecStart=/opt/acvm/deploy/backup/restore.sh drill
+Nice=10
+TimeoutStartSec=3h

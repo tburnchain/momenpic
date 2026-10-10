@@ -1,0 +1,205 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.5"
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "24"
+
+jobs:
+  python:
+    name: python (lint · types · unit tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: uv sync (locked)
+        run: uv sync --frozen
+      - name: ruff
+        run: uv run --no-sync ruff check --output-format=github src tests deploy/grafana
+      - name: mypy (strict)
+        # Reported but not yet blocking: modules are landing in parallel and strict mode is being tightened
+        # module by module. Flip continue-on-error to false once `make typecheck` is clean on main.
+        continue-on-error: true
+        run: uv run --no-sync mypy src
+      - name: unit tests + coverage
+        # pytest-cov is pulled ephemerally (--with) so it is not a project dependency
+        run: >-
+          uv run --frozen --with pytest-cov pytest tests/unit -m "not integration and not render"
+          --cov=acvm --cov-report=term-missing:skip-covered --cov-report=xml:coverage.xml
+          --junitxml=junit.xml
+      - name: dashboards are generated from build_dashboards.py
+        run: uv run --no-sync python deploy/grafana/build_dashboards.py --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: python-test-reports
+          path: |
+            coverage.xml
+            junit.xml
+          retention-days: 14
+
+  render:
+    name: render tests (ffmpeg)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: ffmpeg + Noto CJK
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run --no-sync pytest -m render -q
+
+  migrations-postgres:
+    name: migrations on PostgreSQL 16 + pgvector
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: acvm
+          POSTGRES_PASSWORD: acvm
+          POSTGRES_DB: acvm
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U acvm" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      ACVM_DATABASE_URL: postgresql+asyncpg://acvm:acvm@localhost:5432/acvm
+      PGPASSWORD: acvm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: upgrade → downgrade → upgrade
+        run: |
+          uv run --no-sync alembic upgrade head
+          uv run --no-sync alembic downgrade base
+          uv run --no-sync alembic upgrade head
+          uv run --no-sync python -m acvm.db.migrations wait --timeout 5
+      - name: append-only guards hold (§10)
+        run: |
+          psql() { command psql -h localhost -U acvm -d acvm -v ON_ERROR_STOP=1 -qtA "$@"; }
+          must_fail() { if psql -c "$1" 2>/dev/null; then echo "::error::not rejected: $1"; exit 1; fi; }
+          psql -c "INSERT INTO product (id, coupang_product_id, name, category_id, category_name, price, is_rocket, is_free_shipping, image_url, product_url, regulated, last_seen_at, verified_facts) VALUES (1, '1', 'p', '1', '', 1000, false, false, '', '', false, now(), '{}')"
+          psql -c "INSERT INTO affiliate_link (id, product_id, sub_id, deeplink, short_url, hub_code, signature, publication_key, health, created_at) VALUES (gen_random_uuid(), 1, 's1', 'https://link', 'https://s', 'h1', 'sig', 'k1', 'ok', now())"
+          psql -c "UPDATE affiliate_link SET health = 'sold_out', checked_at = now()"   # mutable columns: allowed
+          must_fail "UPDATE affiliate_link SET deeplink = 'https://evil'"               # link swap
+          must_fail "UPDATE affiliate_link SET sub_id = 's2'"
+          must_fail "DELETE FROM affiliate_link"
+          must_fail "TRUNCATE affiliate_link CASCADE"
+          psql -c "INSERT INTO audit_log (actor, action, target, payload, at) VALUES ('ci', 'test', 't', '{}', now() - interval '400 days')"
+          must_fail "UPDATE audit_log SET actor = 'x'"
+          must_fail "DELETE FROM audit_log"
+          must_fail "TRUNCATE audit_log"
+          psql -c "BEGIN; SET LOCAL acvm.retention = 'on'; DELETE FROM audit_log WHERE at < now() - interval '365 days'; COMMIT;"
+          test "$(psql -c "SELECT count(*) FROM audit_log")" = "0"
+          test "$(psql -c "SELECT count(*) FROM pg_indexes WHERE indexdef LIKE '%USING hnsw%'")" = "3"
+          echo "guards OK"
+
+  console:
+    name: console (lint · build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  deploy-configs:
+    name: deploy configs (compose · prometheus · alertmanager · k8s · shell · Dockerfile)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: docker compose config (prod + dev + tracing)
+        working-directory: deploy/compose
+        run: |
+          sed 's/^\([A-Z_]*PASSWORD\)=$/\1=ci/; s/^CF_ACCESS_\(CONSOLE\|GRAFANA\)_AUD=$/CF_ACCESS_\1_AUD=ci/' .env.example > /tmp/ci.env
+          docker compose --env-file /tmp/ci.env -f docker-compose.yml config -q --no-env-resolution
+          docker compose --env-file /tmp/ci.env -f docker-compose.yml -f docker-compose.tracing.yml config -q --no-env-resolution
+          docker compose --env-file dev.env -f docker-compose.yml -f docker-compose.dev.yml config -q
+      - name: promtool check config + rules
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
+      - name: amtool check-config
+        run: |
+          docker run --rm --entrypoint amtool -v "$PWD/deploy/alertmanager:/cfg:ro" \
+            prom/alertmanager:v0.28.1 check-config /cfg/alertmanager.yml /cfg/alertmanager.dev.yml
+      - name: otel collector validate
+        run: |
+          docker run --rm -e DEPLOYMENT_ENV=ci -v "$PWD/deploy/otel:/cfg:ro" \
+            otel/opentelemetry-collector-contrib:0.135.0 validate --config=/cfg/collector.yaml
+      - name: shellcheck
+        run: shellcheck -x -S warning deploy/backup/*.sh deploy/vault/bootstrap.sh deploy/postgres/*.sh deploy/postgres/initdb/*.sh deploy/compose/initdb/clickhouse/*.sh
+      - name: hadolint
+        run: |
+          for f in deploy/docker/Dockerfile deploy/postgres/Dockerfile; do
+            docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold warning --ignore DL3008 --ignore DL3006 - < "$f"
+          done
+      - name: kustomize build + kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          for o in deploy/k8s/base deploy/k8s/overlays/prod; do
+            kubectl kustomize "$o" | ./kubeconform -strict -summary -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          done
+
+  dependency-scan:
+    name: dependency vulnerabilities (Trivy fs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-dirs: console/node_modules,.venv

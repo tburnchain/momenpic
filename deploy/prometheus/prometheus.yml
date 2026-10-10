@@ -1,0 +1,107 @@
+# Prometheus — single-server P0/P1 (§9). Metric names are the contract in src/acvm/core/metrics.py.
+# ACVM processes are discovered through Docker's embedded DNS (dns_sd A records) so `docker compose up --scale
+# acvm-worker=3` is picked up without editing this file.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: acvm-p0
+    stage: single-server
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ── ACVM application ───────────────────────────────────────────────────────
+  - job_name: acvm-api
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: [acvm-api]
+        type: A
+        port: 8000
+        refresh_interval: 30s
+
+  - job_name: acvm-worker             # Temporal worker, task queue acvm-main
+    dns_sd_configs:
+      - names: [acvm-worker]
+        type: A
+        port: 9464
+        refresh_interval: 30s
+
+  - job_name: acvm-publisher          # Temporal worker, task queue acvm-publish (Vault publisher role)
+    dns_sd_configs:
+      - names: [acvm-publisher]
+        type: A
+        port: 9464
+        refresh_interval: 30s
+
+  - job_name: acvm-render             # Temporal worker, task queue acvm-render (ffmpeg)
+    dns_sd_configs:
+      - names: [acvm-render]
+        type: A
+        port: 9464
+        refresh_interval: 30s
+
+  - job_name: acvm-loops              # periodic loops (single leader)
+    dns_sd_configs:
+      - names: [acvm-loops]
+        type: A
+        port: 9464
+        refresh_interval: 30s
+
+  - job_name: otel-collector          # OTLP metrics re-exported (resource attrs → labels)
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # ── platform services ──────────────────────────────────────────────────────
+  - job_name: otel-collector-self
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  - job_name: temporal
+    static_configs:
+      - targets: ["temporal:9090"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  - job_name: vault
+    metrics_path: /v1/sys/metrics
+    params:
+      format: [prometheus]
+    static_configs:
+      - targets: ["vault:8200"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  - job_name: pushgateway             # backup/restore-drill results (deploy/backup/*.sh)
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

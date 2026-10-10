@@ -1,0 +1,125 @@
+# acvm-api — /api/v1 (behind Cloudflare Access), public /hub + /r, /healthz /readyz /metrics.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acvm-api
+  labels: {app.kubernetes.io/name: acvm-api, acvm.io/tier: app}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app.kubernetes.io/name: acvm-api}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: acvm-api, acvm.io/tier: app, acvm.io/egress: internet}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: acvm-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app.kubernetes.io/name: acvm-api}
+      initContainers:
+        - name: wait-for-migrations
+          image: acvm-api
+          command: ["python", "-m", "acvm.db.migrations", "wait", "--timeout", "900"]
+          envFrom:
+            - secretRef: {name: acvm-runtime}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      containers:
+        - name: api
+          image: acvm-api
+          command: ["uvicorn", "acvm.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - {name: http, containerPort: 8000}
+          envFrom:
+            - configMapRef: {name: acvm-config}
+            - secretRef: {name: acvm-runtime}
+            - secretRef: {name: acvm-approle-api}
+          env:
+            - {name: OTEL_SERVICE_NAME, value: acvm-api}
+            - {name: FORWARDED_ALLOW_IPS, value: "*"}   # only cloudflared can reach :8000 (networkpolicies.yaml)
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+            failureThreshold: 4
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: var, mountPath: /app/var}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}
+        - name: var
+          emptyDir: {sizeLimit: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: acvm-api
+  labels: {app.kubernetes.io/name: acvm-api}
+spec:
+  selector: {app.kubernetes.io/name: acvm-api}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: acvm-api
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: acvm-api}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: acvm-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: acvm-api}

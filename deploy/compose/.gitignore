@@ -1,0 +1,4 @@
+# Real credentials never enter git (see docker-compose.yml header).
+.env
+env/
+secrets/

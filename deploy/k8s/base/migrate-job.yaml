@@ -1,0 +1,43 @@
+# One-shot schema migration (alembic upgrade head). Deployments gate on it with a wait-for-migrations init
+# container (python -m acvm.db.migrations wait), so only this Job ever runs DDL. ttlSecondsAfterFinished lets the
+# next `kubectl apply -k` recreate it with the new image tag.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: acvm-migrate
+  labels: {app.kubernetes.io/name: acvm-migrate, acvm.io/tier: app}
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: acvm-migrate, acvm.io/tier: app}
+    spec:
+      serviceAccountName: acvm-migrate
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: acvm-worker
+          command: ["acvm", "db", "upgrade"]
+          envFrom:
+            - configMapRef: {name: acvm-config}
+            - secretRef: {name: acvm-runtime}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}

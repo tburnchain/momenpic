@@ -1,0 +1,219 @@
+@import "tailwindcss";
+
+/* Theme is driven by <html data-theme="light|dark"> (set before paint by the inline script in
+   layout.tsx). Without JS the OS preference still applies via the media query below. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  color-scheme: light;
+  --page: #f6f6f3;
+  --surface: #fcfcfb;
+  --surface-2: #f1f0ec;
+  --surface-3: #e6e5df;
+  --line: rgba(11, 11, 11, 0.1);
+  --line-strong: rgba(11, 11, 11, 0.2);
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #6b6a65;
+  --axis: #898781;
+  --grid: #e6e5df;
+  --baseline: #c3c2b7;
+
+  --accent: #2a78d6;
+  --accent-strong: #1c5cab;
+  --accent-ink: #1c5cab;
+  --accent-soft: rgba(42, 120, 214, 0.1);
+  --accent-fill: #256abf;
+  --accent-fill-hover: #1c5cab;
+  --on-accent: #ffffff;
+
+  /* Status (fixed, never themed as series) — always paired with icon + label. */
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --good-soft: rgba(12, 163, 12, 0.12);
+  --warn: #fab219;
+  --warn-ink: #7a5200;
+  --warn-soft: rgba(250, 178, 25, 0.2);
+  --serious: #ec835a;
+  --serious-ink: #9a3a12;
+  --serious-soft: rgba(236, 131, 90, 0.18);
+  --critical: #d03b3b;
+  --critical-ink: #a32323;
+  --critical-soft: rgba(208, 59, 59, 0.12);
+
+  /* Categorical series slots (validated order; assigned per entity, never cycled). */
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --s5: #e87ba4;
+  --s6: #008300;
+  --s7: #4a3aa7;
+  --s8: #e34948;
+
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.04), 0 4px 16px rgba(11, 11, 11, 0.04);
+}
+
+/* Dark theme (unlayered so it overrides the unlayered light tokens above by specificity). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --surface-3: #2e2e2b;
+  --line: rgba(255, 255, 255, 0.1);
+  --line-strong: rgba(255, 255, 255, 0.2);
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #a3a298;
+  --axis: #898781;
+  --grid: #2c2c2a;
+  --baseline: #383835;
+
+  --accent: #3987e5;
+  --accent-strong: #5598e7;
+  --accent-ink: #86b6ef;
+  --accent-soft: rgba(57, 135, 229, 0.18);
+  --on-accent: #ffffff;
+
+  --good-ink: #4cc94c;
+  --good-soft: rgba(12, 163, 12, 0.2);
+  --warn-ink: #fab219;
+  --warn-soft: rgba(250, 178, 25, 0.16);
+  --serious-ink: #f0a07f;
+  --serious-soft: rgba(236, 131, 90, 0.18);
+  --critical-ink: #ef7b7b;
+  --critical-soft: rgba(208, 59, 59, 0.22);
+
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
+  --s5: #d55181;
+  --s6: #008300;
+  --s7: #9085e9;
+  --s8: #e66767;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --surface-3: #2e2e2b;
+    --line: rgba(255, 255, 255, 0.1);
+    --line-strong: rgba(255, 255, 255, 0.2);
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #a3a298;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --accent: #3987e5;
+    --accent-ink: #86b6ef;
+    --accent-soft: rgba(57, 135, 229, 0.18);
+  }
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-accent-fill: var(--accent-fill);
+  --color-accent-fill-hover: var(--accent-fill-hover);
+  --color-good: var(--good);
+  --color-good-ink: var(--good-ink);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-ink: var(--warn-ink);
+  --color-warn-soft: var(--warn-soft);
+  --color-serious: var(--serious);
+  --color-serious-ink: var(--serious-ink);
+  --color-serious-soft: var(--serious-soft);
+  --color-critical: var(--critical);
+  --color-critical-ink: var(--critical-ink);
+  --color-critical-soft: var(--critical-soft);
+
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, "Apple SD Gothic Neo",
+    "Malgun Gothic", "맑은 고딕", "Noto Sans KR", "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "D2Coding", monospace;
+
+  --shadow-card: var(--shadow);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+  dialog::backdrop {
+    background: rgba(0, 0, 0, 0.45);
+  }
+  input[type="range"] {
+    accent-color: var(--accent);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes studio-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}

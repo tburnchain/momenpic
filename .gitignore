@@ -1,0 +1,37 @@
+# runtime data — databases, rendered media, DEV SECRETS (var/secrets.dev.json)
+var/
+*.db
+*.db-wal
+*.db-shm
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# secrets & local env (never commit real values; .env.example documents every variable)
+.env
+.env.*
+!.env.example
+deploy/compose/env/*.env
+!deploy/compose/env/*.example
+
+# node / console
+node_modules/
+console/.next/
+console/out/
+console/tsconfig.tsbuildinfo
+
+# os / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

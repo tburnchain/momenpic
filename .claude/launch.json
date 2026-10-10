@@ -1,0 +1,48 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "acvm-api",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--no-sync",
+        "acvm",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "acvm-api-session",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--no-sync",
+        "--env-file",
+        "var/session.env",
+        "acvm",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "acvm-console",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "console",
+        "run",
+        "dev"
+      ],
+      "port": 3000
+    }
+  ]
+}

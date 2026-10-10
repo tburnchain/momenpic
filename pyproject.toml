@@ -1,0 +1,87 @@
+[project]
+name = "acvm"
+version = "1.0.0"
+description = "ACVM — AI Affiliate Content Vending Machine (enterprise build)"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "alembic>=1.20.0",
+    "anthropic>=1.12.1",
+    "asyncpg>=0.31.0",
+    "boto3>=1.43.109",
+    "clickhouse-connect>=0.9.0",
+    "fastapi>=0.115",
+    "httpx>=0.28.1",
+    "hvac>=2.3.0",
+    "jinja2>=3.1.6",
+    "numpy>=2.3",
+    "opentelemetry-api>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "opentelemetry-instrumentation-fastapi>=0.51b0",
+    "opentelemetry-sdk>=1.30",
+    "orjson>=3.10",
+    "pgvector>=0.5.0",
+    "pillow>=11.0",
+    "prometheus-client>=0.21",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyjwt[crypto]>=2.10",
+    "redis>=5.2",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "structlog>=24.4",
+    "temporalio>=1.9",
+    "typer>=0.15",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+acvm = "acvm.cli:app"
+
+[project.optional-dependencies]
+stt = [
+    "faster-whisper>=1.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "fakeredis[lua]>=2.39.0",
+    "hypothesis>=6.168.5",
+    "mypy>=1.20",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --strict-markers"
+markers = [
+    "integration: needs live infrastructure (Postgres/Redis/ClickHouse/Temporal)",
+    "render: needs ffmpeg on PATH",
+]
+filterwarnings = ["ignore::DeprecationWarning:temporalio.*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC", "S", "RUF"]
+ignore = ["S101", "S105", "S106", "S311", "RUF001", "RUF002", "RUF003", "B008", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
